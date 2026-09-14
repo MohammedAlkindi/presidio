@@ -319,9 +319,16 @@ def test_shipped_entry_fields_reach_constructed_recognizer(
             f"constructed recognizer"
         )
 
-    if entry.get("supported_entities"):
+    if entry.get("supported_entities") is not None:
+        # Key presence, not truthiness: an entry that explicitly sets
+        # ``supported_entities: []`` is a configured value like any other and
+        # must still be asserted, not treated as "not set".
         for instance in instances:
-            assert instance.supported_entities == entry["supported_entities"]
+            assert instance.supported_entities == entry["supported_entities"], (
+                f"{entry_id}: supported_entities "
+                f"{entry['supported_entities']!r} from the shipped entry did "
+                f"not reach the constructed recognizer"
+            )
 
     if entry.get("score_thresholds") is not None:
         expected_thresholds = normalize_score_thresholds(entry["score_thresholds"])

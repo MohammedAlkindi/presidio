@@ -286,7 +286,7 @@ def test_uninspectable_signature_drops_entity_keys():
     assert "supported_entity" not in kwargs
 
 
-def test_dropped_entity_key_warns_for_class_defining_its_own_entities(caplog):
+def test_ineffective_entity_key_warns_for_class_defining_its_own_entities(caplog):
     """A class that has neither supported_entity nor supported_entities
     reachable anywhere in its constructor chain (it defines its entities from
     its own configuration, e.g. a LangExtract config file) still loads when

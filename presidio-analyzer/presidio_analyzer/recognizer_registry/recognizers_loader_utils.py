@@ -394,15 +394,17 @@ class RecognizerListLoader:
         # A class that accepts neither key anywhere in its constructor chain
         # defines its entities itself (e.g. from a config file, as
         # LangExtract-based recognizers do) rather than from the registry entry.
-        # Warn -- rather than silently dropping the value -- when the entry
-        # actually tried to set one, so a user relying on it finds out why it
-        # had no effect instead of debugging a mismatch later.
+        # Warn -- rather than staying silent -- when the entry actually tried
+        # to set one, so a user relying on it finds out why it had no effect
+        # instead of debugging a mismatch later. The key itself is left in
+        # kwargs: a class accepting **kwargs simply never reads it, and
+        # removing it here would change what reaches the constructor.
         entity_key_reachable = (
             RecognizerListLoader.SUPPORTED_ENTITY in reachable
             or RecognizerListLoader.SUPPORTED_ENTITIES in reachable
         )
         if not entity_key_reachable:
-            dropped_keys = [
+            ineffective_keys = [
                 key
                 for key in (
                     RecognizerListLoader.SUPPORTED_ENTITY,
@@ -410,13 +412,13 @@ class RecognizerListLoader:
                 )
                 if key in kwargs
             ]
-            if dropped_keys:
+            if ineffective_keys:
                 logger.warning(
                     "%s does not apply 'supported_entity' or 'supported_entities'; "
                     "ignoring %s from its configuration because %s defines its "
                     "supported entities from its own configuration.",
                     recognizer_cls.__name__,
-                    " and ".join(dropped_keys),
+                    " and ".join(ineffective_keys),
                     recognizer_cls.__name__,
                 )
 
