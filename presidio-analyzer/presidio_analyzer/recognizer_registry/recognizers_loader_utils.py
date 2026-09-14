@@ -381,7 +381,16 @@ class RecognizerListLoader:
         # registry entry sets context for such a class, drop it with a warning
         # instead of letting the constructor raise ``TypeError`` and take the
         # whole registry down.
-        if "context" in kwargs and "context" not in reachable:
+        # The ``has_var_kw`` guard keeps this rule backward compatible: before
+        # it existed, a leaf constructor accepting ``**kwargs`` received
+        # ``context`` and could consume it without declaring the parameter.
+        # Dropping the key for those classes would be a silent loss of
+        # configuration for out-of-tree recognizers, so the drop is scoped to
+        # strict leaf signatures -- the only ones that raise TypeError on an
+        # unexpected keyword. Every in-repo recognizer that fails the
+        # reachability check has a strict leaf signature, so the shipped set
+        # behaves identically either way.
+        if "context" in kwargs and "context" not in reachable and not has_var_kw:
             kwargs.pop("context")
             logger.warning(
                 "%s does not accept 'context'; ignoring the context words "
@@ -396,9 +405,11 @@ class RecognizerListLoader:
         # LangExtract-based recognizers do) rather than from the registry entry.
         # Warn -- rather than staying silent -- when the entry actually tried
         # to set one, so a user relying on it finds out why it had no effect
-        # instead of debugging a mismatch later. The key itself is left in
-        # kwargs: a class accepting **kwargs simply never reads it, and
-        # removing it here would change what reaches the constructor.
+        # instead of debugging a mismatch later. This branch only warns; what
+        # actually reaches the constructor is decided by the filter below,
+        # which always removes ``supported_entity`` when it is not explicitly
+        # declared and keeps ``supported_entities`` when the class accepts
+        # ``**kwargs``.
         entity_key_reachable = (
             RecognizerListLoader.SUPPORTED_ENTITY in reachable
             or RecognizerListLoader.SUPPORTED_ENTITIES in reachable

@@ -356,6 +356,33 @@ def test_context_kept_without_warning_for_class_accepting_it(caplog):
     assert not warning_messages, f"expected no WARNING, got {warning_messages!r}"
 
 
+def test_context_kept_for_leaf_accepting_kwargs_without_declaring_it(caplog):
+    """A leaf constructor accepting **kwargs keeps context even when no
+    ``context`` parameter is reachable along its MRO.
+
+    Such a class can read context straight out of **kwargs without declaring
+    it, and it cannot raise TypeError on an unexpected keyword, so dropping the
+    key would silently remove configuration from out-of-tree recognizers. The
+    drop is therefore scoped to strict leaf signatures.
+    """
+    with caplog.at_level("WARNING", logger="presidio-analyzer"):
+        kwargs = RecognizerListLoader._prepare_recognizer_kwargs(
+            recognizer_conf={},
+            language_conf={"supported_language": "en", "context": ["visa"]},
+            recognizer_cls=ChildForwardsKwargs,
+        )
+
+    assert kwargs["context"] == ["visa"]
+    context_warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING" and "'context'" in r.getMessage()
+    ]
+    assert not context_warnings, (
+        f"expected no context WARNING for a **kwargs leaf, got {context_warnings!r}"
+    )
+
+
 def test_no_warning_when_entity_key_is_reachable_through_kwargs_forwarding(caplog):
     """A subclass whose own signature names neither entity key but forwards
     **kwargs to a parent that accepts one (StanzaRecognizer -> SpacyRecognizer)

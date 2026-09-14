@@ -23,6 +23,7 @@ something a user discovers when they flip ``enabled: true``:
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 from typing import Any, Dict, List, Set, Tuple, Type
 
@@ -91,6 +92,49 @@ def patched_loads(monkeypatch):
     """
     for cls in CONCRETE_RECOGNIZER_CLASSES:
         monkeypatch.setattr(cls, "load", lambda self: None, raising=False)
+
+
+# Recognizers whose *constructor* imports an optional extra, mapped to the
+# module that extra provides. On the supported core/dev install (no
+# ``--all-extras``) these constructors refuse to build with an actionable
+# ImportError/ValueError -- intended behavior, not a conformance failure -- so
+# the parametrized cases below report a skip instead of a hard failure.
+#
+# The skip is decided by probing for the module, not by catching the exception:
+# an unexpected ImportError from any class, including these, still fails the
+# test rather than turning green. Classes whose optional import happens only in
+# ``load()`` (GLiNER, Stanza, Transformers NER) are absent on purpose -- this
+# suite patches ``load`` to a no-op, so they construct without the extra.
+OPTIONAL_DEPENDENCY_MODULES: Dict[str, str] = {
+    "AzureAILanguageRecognizer": "azure.ai.textanalytics",
+    "AzureHealthDeidRecognizer": "azure.health.deidentification",
+    "AzureOpenAILangExtractRecognizer": "langextract",
+    "BasicLangExtractRecognizer": "langextract",
+    "HuggingFaceNerRecognizer": "transformers",
+    "MedicalNERRecognizer": "transformers",
+}
+
+
+def _skip_if_optional_dependency_missing(class_name: str) -> None:
+    """Skip when the class needs an optional extra that is not installed."""
+    module = OPTIONAL_DEPENDENCY_MODULES.get(class_name)
+    if module is None:
+        return
+    try:
+        found = importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        found = False
+    if not found:
+        pytest.skip(
+            f"{class_name} needs optional dependency {module!r}; install the "
+            f"extras (uv sync --all-extras) to run this conformance case"
+        )
+
+
+def test_optional_dependency_modules_names_only_real_classes():
+    """Guard ``OPTIONAL_DEPENDENCY_MODULES`` against stale entries."""
+    names = {cls.__name__ for cls in CONCRETE_RECOGNIZER_CLASSES}
+    assert set(OPTIONAL_DEPENDENCY_MODULES) <= names
 
 
 def _reachable_init_param_names(cls: Type[EntityRecognizer]) -> Set[str]:
@@ -239,12 +283,26 @@ def _entry_language_configs(entry: Dict[str, Any]) -> List[Tuple[str, Any]]:
     (``None`` if it sets none).
     """
     languages = entry.get("supported_languages")
-    if not languages:
+    if languages is None:
+        # The loader carries the entry-level ``context`` into every fallback
+        # language (``_get_recognizer_context``), so the expectation must too;
+        # returning None here would stop checking context for these entries.
+        entry_context = entry.get("context")
         return [
-            (language, None)
+            (language, entry_context)
             for language in DEFAULT_CONF_DATA.get("supported_languages") or ["en"]
         ]
+    if not languages:
+        raise AssertionError(
+            f"{_entry_id(entry)}: supported_languages is an empty list; the "
+            f"loader indexes element 0 and would raise IndexError"
+        )
     if isinstance(languages[0], str):
+        # Known loader behavior, mirrored rather than asserted against: for a
+        # bare list of language codes the loader sets context to None and
+        # discards any entry-level ``context``, even though BaseRecognizerConfig
+        # accepts that shape. No shipped entry combines the two, so nothing is
+        # lost today. See test_entry_context_is_dropped_for_bare_language_list.
         return [(language, None) for language in languages]
     return [(item["language"], item.get("context")) for item in languages]
 
@@ -280,6 +338,7 @@ def test_shipped_entry_fields_reach_constructed_recognizer(
     ``test_recognizers_loader_utils.py``).
     """
     entry_id = _entry_id(entry)
+    _skip_if_optional_dependency_missing(entry_id)
     language_configs = _entry_language_configs(entry)
     languages = [language for language, _ in language_configs]
     conf_entry = dict(entry, enabled=True)
@@ -456,6 +515,7 @@ def test_synthetic_entry_round_trips_to_every_concrete_class(
     the entry must still load: the loader drops the key, logs a WARNING
     naming the class, and the instance keeps the base-class default ``[]``.
     """
+    _skip_if_optional_dependency_missing(cls.__name__)
     for name, value in REQUIRED_ENV.get(cls.__name__, {}).items():
         monkeypatch.setenv(name, value)
 
@@ -480,7 +540,16 @@ def test_synthetic_entry_round_trips_to_every_concrete_class(
 
     assert instance.name == f"conf_{cls.__name__}"
     assert instance.supported_language == "en"
-    accepts_context = "context" in _reachable_init_param_names(cls)
+    # Mirrors the loader: context is dropped only for a strict leaf signature
+    # that cannot reach a ``context`` parameter. A leaf accepting **kwargs keeps
+    # the key, so no warning fires for it.
+    leaf_params = inspect.signature(cls.__init__).parameters
+    leaf_accepts_var_kw = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in leaf_params.values()
+    )
+    accepts_context = (
+        "context" in _reachable_init_param_names(cls) or leaf_accepts_var_kw
+    )
     context_warnings = [
         r.getMessage()
         for r in caplog.records
@@ -512,6 +581,50 @@ def test_context_not_applied_names_only_real_classes():
     """Guard ``CONTEXT_NOT_APPLIED`` against stale entries."""
     names = {cls.__name__ for cls in CONCRETE_RECOGNIZER_CLASSES}
     assert CONTEXT_NOT_APPLIED <= names
+
+
+def test_entry_context_is_dropped_for_bare_language_list():
+    """Entry-level context is discarded for a bare list of language codes.
+
+    ``BaseRecognizerConfig`` accepts an entry that sets ``context`` alongside
+    ``supported_languages: [en]``, but ``_get_recognizer_languages`` returns
+    ``context: None`` for that shape and only ``_get_recognizer_context`` (the
+    no-``supported_languages`` path) reads the entry-level key, so the words
+    never reach the recognizer. Only the per-language form
+    (``{language, context}``) works.
+
+    This test pins today's behavior rather than asserting the contract: no
+    shipped entry combines the two keys, and changing the loader would alter
+    detection for anyone whose YAML relies on the current result. A later turn
+    that fixes the drop will fail here and update this test.
+    """
+    entry_context = ["zeta"]
+    configuration = {
+        "global_regex_flags": GLOBAL_REGEX_FLAGS,
+        "supported_languages": ["en"],
+        "recognizers": [
+            {
+                "name": "CreditCardRecognizer",
+                "type": "predefined",
+                "enabled": True,
+                "supported_languages": ["en"],
+                "context": entry_context,
+            }
+        ],
+    }
+
+    registry = RecognizerRegistryProvider(
+        registry_configuration=configuration
+    ).create_recognizer_registry()
+    instance = [
+        r for r in registry.recognizers if type(r).__name__ == "CreditCardRecognizer"
+    ][0]
+
+    assert instance.context != entry_context, (
+        "entry-level context now reaches the recognizer for a bare language "
+        "list -- the silent drop this test documents has been fixed, so update "
+        "it to assert the contract instead"
+    )
 
 
 @pytest.mark.xfail(strict=True, reason="flipped in turn 06 (derived schema)")
